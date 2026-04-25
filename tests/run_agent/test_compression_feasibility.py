@@ -151,15 +151,14 @@ def test_feasibility_check_passes_live_main_runtime():
         agent._emit_status = lambda msg: None
         agent._check_compression_model_feasibility()
 
-    mock_get_client.assert_called_once_with(
-        "compression",
-        main_runtime={
-            "model": "gpt-5.4",
-            "provider": "openai-codex",
+    # Called for compression + flush_memories; verify compression call
+    assert any(
+        c == (("compression",), {"main_runtime": {
+            "model": "gpt-5.4", "provider": "openai-codex",
             "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "codex-token",
-            "api_mode": "codex_responses",
-        },
+            "api_key": "codex-token", "api_mode": "codex_responses",
+        }})
+        for c in mock_get_client.call_args_list
     )
 
 
@@ -179,11 +178,10 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
-        base_url="http://custom-endpoint:8080/v1",
-        api_key="sk-custom",
-        config_context_length=1_000_000,
+    assert mock_ctx_len.call_args_list[0] == (
+        ("custom/big-model",),
+        {"base_url": "http://custom-endpoint:8080/v1",
+         "api_key": "sk-custom", "config_context_length": 1_000_000},
     )
 
 
@@ -201,11 +199,10 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
-        "custom/model",
-        base_url="http://custom:8080/v1",
-        api_key="sk-test",
-        config_context_length=None,
+    assert mock_ctx_len.call_args_list[0] == (
+        ("custom/model",),
+        {"base_url": "http://custom:8080/v1",
+         "api_key": "sk-test", "config_context_length": None},
     )
 
 
@@ -253,11 +250,10 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         )
 
     assert agent._aux_compression_context_length_config == 1_000_000
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
-        base_url="http://custom-endpoint:8080/v1",
-        api_key="sk-custom",
-        config_context_length=1_000_000,
+    assert mock_ctx_len.call_args_list[0] == (
+        ("custom/big-model",),
+        {"base_url": "http://custom-endpoint:8080/v1",
+         "api_key": "sk-custom", "config_context_length": 1_000_000},
     )
 
 

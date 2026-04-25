@@ -2401,6 +2401,33 @@ class AIAgent:
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
             )
 
+            # Also resolve the flush_memories auxiliary model — it may differ
+            # from the compression model when the user configures separate
+            # auxiliary.flush_memories.provider/model, or when the fallback
+            # chain lands on a different provider.  flush_memories runs with
+            # the FULL pre-compression conversation, so its model's context
+            # must also be respected.
+            try:
+                flush_client, flush_model = get_text_auxiliary_client(
+                    "flush_memories",
+                    main_runtime=self._current_main_runtime(),
+                )
+                if flush_client and flush_model:
+                    _flush_ctx = get_model_context_length(
+                        flush_model,
+                        base_url=str(getattr(flush_client, "base_url", "") or ""),
+                        api_key=str(getattr(flush_client, "api_key", "") or ""),
+                    )
+                    if _flush_ctx and _flush_ctx < aux_context:
+                        logger.info(
+                            "flush_memories model %s context (%d) < compression "
+                            "model %s context (%d) — using the smaller value",
+                            flush_model, _flush_ctx, aux_model, aux_context,
+                        )
+                        aux_context = _flush_ctx
+            except Exception:
+                pass  # Non-fatal — fall through with compression model's context
+
             # Hard floor: the auxiliary compression model must have at least
             # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model
             # is already required to meet this floor (checked earlier in
@@ -7990,6 +8017,66 @@ class AIAgent:
             if not memory_tool_def:
                 messages.pop()  # remove flush msg
                 return
+
+            # ── Defence-in-depth: trim messages to fit auxiliary context ──
+            #
+            # _check_compression_model_feasibility already lowers the
+            # compression threshold so conversations *triggered by preflight
+            # compression* should fit.  But flush_memories is also called
+            # from CLI /new and gateway session resets — paths that bypass
+            # the preflight check entirely.  Trim here as a safety net.
+            try:
+                from agent.auxiliary_client import get_text_auxiliary_client
+                from agent.model_metadata import (
+                    get_model_context_length,
+                    estimate_messages_tokens_rough,
+                )
+                _fc, _fm = get_text_auxiliary_client(
+                    "flush_memories",
+                    main_runtime=self._current_main_runtime(),
+                )
+                _fctx = 0
+                if _fc and _fm:
+                    _fctx = get_model_context_length(
+                        _fm,
+                        base_url=str(getattr(_fc, "base_url", "") or ""),
+                        api_key=str(getattr(_fc, "api_key", "") or ""),
+                    )
+                if not _fctx:
+                    _fctx = getattr(
+                        getattr(self, "context_compressor", None),
+                        "context_length", 0,
+                    )
+                if _fctx:
+                    _budget = _fctx - 5120 - 500  # output + tool schema
+                    if _budget > 0:
+                        _est = estimate_messages_tokens_rough(api_messages)
+                        if _est > _budget:
+                            _sys = []
+                            _conv = api_messages
+                            if api_messages and api_messages[0].get("role") == "system":
+                                _sys = [api_messages[0]]
+                                _conv = api_messages[1:]
+                            _rem = _budget - estimate_messages_tokens_rough(_sys)
+                            _kept: list = []
+                            _acc = 0
+                            for _m in reversed(_conv):
+                                _mt = estimate_messages_tokens_rough([_m])
+                                if _acc + _mt > _rem:
+                                    break
+                                _kept.append(_m)
+                                _acc += _mt
+                            _kept.reverse()
+                            if len(_kept) < 3 and len(_conv) >= 3:
+                                _kept = _conv[-3:]
+                            api_messages = _sys + _kept
+                            logger.info(
+                                "flush_memories: trimmed %d→%d msgs to fit "
+                                "%d-token aux context",
+                                len(_sys) + len(_conv), len(api_messages), _fctx,
+                            )
+            except Exception as _te:
+                logger.debug("flush_memories: context trim failed: %s", _te)
 
             # Use auxiliary client for the flush call when available --
             # it's cheaper and avoids Codex Responses API incompatibility.
